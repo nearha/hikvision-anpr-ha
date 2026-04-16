@@ -20,6 +20,7 @@ from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.network import NoURLAvailableError, get_url
+from homeassistant.components.network import async_get_source_ip
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (

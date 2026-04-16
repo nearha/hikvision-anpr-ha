@@ -4,15 +4,18 @@ from dataclasses import dataclass, replace
 import csv
 import json
 import datetime as dt
+import ipaddress
 import logging
+import re
 from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 from urllib.parse import quote, urlparse
 
+import urllib3
+
 import requests
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
-from requests.exceptions import HTTPError
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
@@ -23,10 +26,10 @@ from .const import (
     AUTH_BASIC,
     CONF_AUTH_MODE,
     CONF_CHANNEL,
-    CONF_HTTP_HOST_ID,
     CONF_MEDIA_DIR,
     CONF_PORT,
     CONF_USE_HTTPS,
+    DEFAULT_HTTP_HOST_ID,
     DEFAULT_MEDIA_DIR,
     DOMAIN,
     EVENT_TYPE,
@@ -50,6 +53,7 @@ from .parser import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 @dataclass(slots=True)
@@ -116,6 +120,61 @@ def _value_or_unknown(value: Any) -> str:
     return text if text else STATE_UNKNOWN
 
 
+def _is_ip_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _replace_tag(xml: str, tag: str, value: str) -> str:
+    pattern = rf"<{tag}>.*?</{tag}>"
+    repl = f"<{tag}>{value}</{tag}>"
+    if re.search(pattern, xml, flags=re.DOTALL):
+        return re.sub(pattern, repl, xml, count=1, flags=re.DOTALL)
+    raise ValueError(f"Tag <{tag}> not found in camera XML")
+
+
+def _ensure_literal_empty_tag(xml: str, tag: str) -> str:
+    xml = re.sub(rf"<{tag}\s*/>", f"<{tag}></{tag}>", xml)
+    xml = re.sub(rf"<{tag}\s+></{tag}>", f"<{tag}></{tag}>", xml)
+    if re.search(rf"<{tag}>.*?</{tag}>", xml, flags=re.DOTALL):
+        return re.sub(rf"<{tag}>.*?</{tag}>", f"<{tag}></{tag}>", xml, count=1, flags=re.DOTALL)
+    raise ValueError(f"Tag <{tag}> not found in camera XML")
+
+
+def _ensure_anpr_block(xml: str) -> str:
+    if "<ANPR>" not in xml:
+        insert_before = xml.rfind("</HttpHostNotification>")
+        if insert_before == -1:
+            raise ValueError("Invalid XML: missing </HttpHostNotification>")
+        xml = (
+            xml[:insert_before]
+            + "\n<ANPR>\n<detectionUpLoadPicturesType>all</detectionUpLoadPicturesType>\n</ANPR>\n"
+            + xml[insert_before:]
+        )
+
+    if re.search(r"<detectionUpLoadPicturesType(?:\s+[^>]*)?>.*?</detectionUpLoadPicturesType>", xml, flags=re.DOTALL):
+        xml = re.sub(
+            r"<detectionUpLoadPicturesType(?:\s+[^>]*)?>.*?</detectionUpLoadPicturesType>",
+            "<detectionUpLoadPicturesType>all</detectionUpLoadPicturesType>",
+            xml,
+            count=1,
+            flags=re.DOTALL,
+        )
+    else:
+        xml = xml.replace("<ANPR>", "<ANPR>\n<detectionUpLoadPicturesType>all</detectionUpLoadPicturesType>", 1)
+
+    xml = re.sub(
+        r"<detectionUpLoadPicturesType\s+[^>]*>",
+        "<detectionUpLoadPicturesType>",
+        xml,
+        flags=re.DOTALL,
+    )
+    return xml
+
+
 class HikvisionANPRManager:
     def __init__(self, hass: HomeAssistant, entry) -> None:
         self.hass = hass
@@ -128,7 +187,7 @@ class HikvisionANPRManager:
         self.password: str = entry.data["password"]
         self.auth_mode: str = entry.data[CONF_AUTH_MODE]
         self.channel: int = entry.data[CONF_CHANNEL]
-        self.http_host_id: int = entry.data[CONF_HTTP_HOST_ID]
+        self.http_host_id: int = DEFAULT_HTTP_HOST_ID
         self.media_dir = Path(entry.data.get(CONF_MEDIA_DIR, DEFAULT_MEDIA_DIR))
         self.media_dir.mkdir(parents=True, exist_ok=True)
         self.csv_path = self.media_dir / "events.csv"
@@ -171,12 +230,6 @@ class HikvisionANPRManager:
         return self.device_details
 
     async def async_stop(self) -> None:
-        session = self._session
-        if session is not None:
-            try:
-                session.close()
-            except Exception:
-                pass
         self._set_state(replace(self._current_state, status=STATE_STOPPED))
 
     async def _discover_callback_base_url(self) -> None:
@@ -206,34 +259,54 @@ class HikvisionANPRManager:
             "configuration_url": self.base_url,
         }
 
-    def _build_session(self) -> requests.Session:
+    def _new_session(self) -> requests.Session:
         session = requests.Session()
         session.verify = bool(self.entry.data.get("verify_ssl", False))
         if self.auth_mode == AUTH_BASIC:
             session.auth = HTTPBasicAuth(self.username, self.password)
         else:
             session.auth = HTTPDigestAuth(self.username, self.password)
-        session.headers.update({"User-Agent": "homeassistant-hikvision-anpr/0.2.0"})
+        session.headers.update({
+            "User-Agent": "homeassistant-hikvision-anpr/0.3.0",
+            "Connection": "close",
+        })
         return session
 
+    def _request_sync(
+        self,
+        method: str,
+        url: str,
+        *,
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: tuple[int, int] = (10, 20),
+    ) -> requests.Response:
+        def do_one() -> requests.Response:
+            session = self._new_session()
+            try:
+                return session.request(method, url, data=data, headers=headers, timeout=timeout)
+            finally:
+                session.close()
+
+        response = do_one()
+        if response.status_code == 401:
+            response = do_one()
+        return response
+
     def _fetch_device_details_sync(self) -> DeviceDetails:
-        session = self._build_session()
-        try:
-            response = session.get(f"{self.base_url}/ISAPI/System/deviceInfo", timeout=(10, 15))
-            response.raise_for_status()
-            parsed = parse_xml_bytes(response.content)
-            root = parsed.get("DeviceInfo", parsed)
-            if not isinstance(root, dict):
-                raise ValueError("Invalid device info response")
-            return DeviceDetails(
-                name=_value_or_unknown(root.get("deviceName")),
-                model=_value_or_unknown(root.get("model")),
-                serial_number=_value_or_unknown(root.get("serialNumber")),
-                mac_address=_value_or_unknown(root.get("macAddress")),
-                manufacturer=_value_or_unknown(root.get("manufacturer")),
-            )
-        finally:
-            session.close()
+        response = self._request_sync("GET", f"{self.base_url}/ISAPI/System/deviceInfo", timeout=(10, 15))
+        response.raise_for_status()
+        parsed = parse_xml_bytes(response.content)
+        root = parsed.get("DeviceInfo", parsed)
+        if not isinstance(root, dict):
+            raise ValueError("Invalid device info response")
+        return DeviceDetails(
+            name=_value_or_unknown(root.get("deviceName")),
+            model=_value_or_unknown(root.get("model")),
+            serial_number=_value_or_unknown(root.get("serialNumber")),
+            mac_address=_value_or_unknown(root.get("macAddress")),
+            manufacturer=_value_or_unknown(root.get("manufacturer")),
+        )
 
     def _ensure_csv(self) -> None:
         if self.csv_path.exists():
@@ -672,74 +745,104 @@ class HikvisionANPRManager:
         self._append_csv(record)
         return self._state_from_record(record)
 
-    def _http_host_xml(self) -> str:
-        parsed = urlparse(self.callback_url or "")
-        if not parsed.hostname:
+    def _callback_url_for_device(self) -> str:
+        if not self.callback_url:
             raise ValueError("Home Assistant callback URL is not available")
-        callback_path = parsed.path.rstrip("/") or self.callback_path
-        if callback_path != self.callback_path and not callback_path.endswith(self.callback_path):
-            callback_path = f"{callback_path}{self.callback_path}"
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        return (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<HttpHostNotification version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">'
-            f'<id>{self.http_host_id}</id>'
-            f'<url>{callback_path}</url>'
-            '<addressingFormatType>ipaddress</addressingFormatType>'
-            f'<ipAddress>{parsed.hostname}</ipAddress>'
-            f'<portNo>{port}</portNo>'
-            '</HttpHostNotification>'
+        return self.callback_url
+
+    def _build_http_host_payload_sync(self) -> str:
+        callback = urlparse(self._callback_url_for_device())
+        if not callback.hostname:
+            raise ValueError("Invalid Home Assistant callback URL")
+
+        response = self._request_sync(
+            "GET",
+            f"{self.base_url}/ISAPI/Event/notification/httpHosts/{self.http_host_id}",
         )
+        response.raise_for_status()
+        current_xml = response.text
+        if "<HttpHostNotification" not in current_xml:
+            raise ValueError("Camera did not return a valid HttpHostNotification XML")
+
+        callback_path = callback.path or "/"
+        if callback.query:
+            callback_path = f"{callback_path}?{callback.query}"
+        protocol_type = "HTTPS" if callback.scheme.lower() == "https" else "HTTP"
+        callback_port = callback.port or (443 if callback.scheme.lower() == "https" else 80)
+
+        xml = current_xml
+        xml = _replace_tag(xml, "id", str(self.http_host_id))
+        xml = _replace_tag(xml, "url", callback_path)
+        xml = _replace_tag(xml, "protocolType", protocol_type)
+        xml = _replace_tag(xml, "parameterFormatType", "XML")
+
+        if _is_ip_address(callback.hostname):
+            xml = _replace_tag(xml, "addressingFormatType", "ipaddress")
+            xml = _replace_tag(xml, "ipAddress", callback.hostname)
+            xml = re.sub(r"<hostName>.*?</hostName>\s*", "", xml, count=1, flags=re.DOTALL)
+        else:
+            xml = _replace_tag(xml, "addressingFormatType", "hostName")
+            xml = re.sub(r"<ipAddress>.*?</ipAddress>\s*", "", xml, count=1, flags=re.DOTALL)
+            if "<hostName>" in xml:
+                xml = _replace_tag(xml, "hostName", callback.hostname)
+            elif "<hostname>" in xml:
+                xml = _replace_tag(xml, "hostname", callback.hostname)
+            else:
+                xml = xml.replace("<portNo>", f"<hostName>{callback.hostname}</hostName>\n<portNo>", 1)
+
+        xml = _replace_tag(xml, "portNo", str(callback_port))
+        xml = _ensure_literal_empty_tag(xml, "userName")
+        if "<httpAuthenticationMethod>" in xml:
+            xml = _replace_tag(xml, "httpAuthenticationMethod", "none")
+        else:
+            xml = xml.replace("</userName>", "</userName>\n<httpAuthenticationMethod>none</httpAuthenticationMethod>", 1)
+        if "<httpBroken>" in xml:
+            xml = _replace_tag(xml, "httpBroken", "true")
+
+        xml = _ensure_anpr_block(xml)
+        return xml
 
     def _ensure_baseline_protocol_sync(self) -> None:
-        session = self._build_session()
-        try:
-            xml_body = (
-                '<?xml version="1.0" encoding="utf-8"?>'
-                '<AlarmHttpPushProtocol version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">'
-                '<baseLineProtocolEnabled>true</baseLineProtocolEnabled>'
-                '</AlarmHttpPushProtocol>'
-            )
-            response = session.put(
-                f"{self.base_url}/ISAPI/Traffic/ANPR/alarmHttpPushProtocol",
-                data=xml_body.encode("utf-8"),
-                headers={"Content-Type": 'application/xml; charset="UTF-8"'},
-                timeout=(10, 20),
-            )
-            if response.status_code >= 400:
-                _LOGGER.debug("Ignoring baseline protocol setup response %s: %s", response.status_code, response.text)
-        finally:
-            session.close()
+        xml_body = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<AlarmHttpPushProtocol version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">'
+            '<baseLineProtocolEnabled>true</baseLineProtocolEnabled>'
+            '</AlarmHttpPushProtocol>'
+        )
+        response = self._request_sync(
+            "PUT",
+            f"{self.base_url}/ISAPI/Traffic/ANPR/alarmHttpPushProtocol",
+            data=xml_body.encode("utf-8"),
+            headers={"Content-Type": 'application/xml; charset="UTF-8"'},
+        )
+        if response.status_code >= 400:
+            _LOGGER.debug("Ignoring baseline protocol setup response %s: %s", response.status_code, response.text)
 
     def _configure_http_host_sync(self) -> str:
-        session = self._build_session()
-        try:
-            xml_body = self._http_host_xml()
-            response = session.put(
-                f"{self.base_url}/ISAPI/Event/notification/httpHosts/{self.http_host_id}",
-                data=xml_body.encode("utf-8"),
-                headers={"Content-Type": 'application/xml; charset="UTF-8"'},
-                timeout=(10, 20),
-            )
-            response.raise_for_status()
-            return response.text
-        finally:
-            session.close()
+        xml_body = self._build_http_host_payload_sync()
+        response = self._request_sync(
+            "PUT",
+            f"{self.base_url}/ISAPI/Event/notification/httpHosts/{self.http_host_id}",
+            data=xml_body.encode("utf-8"),
+            headers={"Content-Type": 'application/xml; charset="UTF-8"'},
+        )
+        response.raise_for_status()
+        if "badXmlContent" in response.text:
+            raise ValueError(response.text)
+        return response.text
 
     def _test_http_host_sync(self) -> str:
-        session = self._build_session()
-        try:
-            xml_body = self._http_host_xml()
-            response = session.post(
-                f"{self.base_url}/ISAPI/Event/notification/httpHosts/{self.http_host_id}/test",
-                data=xml_body.encode("utf-8"),
-                headers={"Content-Type": 'application/xml; charset="UTF-8"'},
-                timeout=(10, 20),
-            )
-            response.raise_for_status()
-            return response.text
-        finally:
-            session.close()
+        xml_body = self._build_http_host_payload_sync()
+        response = self._request_sync(
+            "POST",
+            f"{self.base_url}/ISAPI/Event/notification/httpHosts/{self.http_host_id}/test",
+            data=xml_body.encode("utf-8"),
+            headers={"Content-Type": 'application/xml; charset="UTF-8"'},
+        )
+        response.raise_for_status()
+        if "<errorCode>0</errorCode>" not in response.text and "<errorDescription>ok</errorDescription>" not in response.text:
+            raise ValueError(response.text)
+        return response.text
 
     async def async_configure_listener_on_device(self) -> None:
         await self._discover_callback_base_url()
@@ -761,16 +864,13 @@ class HikvisionANPRManager:
             raise
 
     def _fetch_mnpr_sync(self) -> LatestEventState | None:
-        session = self._build_session()
-        try:
-            response = session.get(
-                f"{self.base_url}/ISAPI/Traffic/MNPR/channels/{self.channel}",
-                timeout=(10, 30),
-            )
-            response.raise_for_status()
-            return self._handle_callback_sync({"content-type": response.headers.get("Content-Type", "")}, response.content)
-        finally:
-            session.close()
+        response = self._request_sync(
+            "GET",
+            f"{self.base_url}/ISAPI/Traffic/MNPR/channels/{self.channel}",
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        return self._handle_callback_sync({"content-type": response.headers.get("Content-Type", "")}, response.content)
 
     async def async_fetch_mnpr_result(self) -> None:
         state = await self.hass.async_add_executor_job(self._fetch_mnpr_sync)

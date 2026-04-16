@@ -13,13 +13,11 @@ from .const import (
     AUTH_DIGEST,
     CONF_AUTH_MODE,
     CONF_CHANNEL,
-    CONF_HTTP_HOST_ID,
     CONF_MEDIA_DIR,
     CONF_PORT,
     CONF_USE_HTTPS,
     DEFAULT_AUTH_MODE,
     DEFAULT_CHANNEL,
-    DEFAULT_HTTP_HOST_ID,
     DEFAULT_MEDIA_DIR,
     DEFAULT_PORT,
     DEFAULT_USE_HTTPS,
@@ -46,7 +44,6 @@ class HikvisionANPRConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_AUTH_MODE, default=user_input.get(CONF_AUTH_MODE, DEFAULT_AUTH_MODE)): vol.In([AUTH_DIGEST, AUTH_BASIC]),
                 vol.Required(CONF_VERIFY_SSL, default=user_input.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)): bool,
                 vol.Required(CONF_CHANNEL, default=user_input.get(CONF_CHANNEL, DEFAULT_CHANNEL)): vol.All(int, vol.Range(min=1)),
-                vol.Required(CONF_HTTP_HOST_ID, default=user_input.get(CONF_HTTP_HOST_ID, DEFAULT_HTTP_HOST_ID)): vol.All(int, vol.Range(min=1, max=8)),
                 vol.Required(CONF_MEDIA_DIR, default=user_input.get(CONF_MEDIA_DIR, DEFAULT_MEDIA_DIR)): str,
             }
         )
@@ -56,7 +53,10 @@ class HikvisionANPRConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 data = {**user_input, CONF_HOST: user_input[CONF_HOST].strip().rstrip("/")}
-                manager = HikvisionANPRManager(self.hass, type("TmpEntry", (), {"data": data, "entry_id": "validate"})())
+                manager = HikvisionANPRManager(
+                    self.hass,
+                    type("TmpEntry", (), {"data": data, "entry_id": "validate"})(),
+                )
                 details = await manager.async_initialize()
             except Exception as err:  # pylint: disable=broad-except
                 errors["base"] = "cannot_connect"

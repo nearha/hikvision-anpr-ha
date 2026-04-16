@@ -1,96 +1,30 @@
-# Hikvision ANPR for Home Assistant
+# Hikvision ANPR
 
-Custom integration for Hikvision ANPR cameras using ISAPI in **listening mode**.
+Custom integration for Home Assistant that receives Hikvision ANPR events in listening mode (`httpHosts`).
 
 ## Features
 
-- Config flow via the Home Assistant UI
-- Auto-configures the camera callback endpoint during setup/reconfigure
-- Parses ANPR events and stores images in `/media/hikvison_anpr`
-- Exposes sensors for the latest event
-- Exposes three image entities:
-  - last license plate image
-  - last vehicle image
-  - last detection image
-- Fires a Home Assistant bus event: `hikvision_anpr_event`
-- Exposes a native Home Assistant event entity with attributes from the latest ANPR event
+- Auto-configures `httpHosts/1` on setup
+- Auto-tests callback after configuration
+- Receives ANPR events by callback instead of polling
+- Creates sensors for the latest ANPR data
+- Creates image entities for plate, vehicle, and detection images
+- Saves media files under Home Assistant media storage
+- Supports HTTP or HTTPS to the camera
 
 ## Installation with HACS
 
-1. Push this repository to GitHub.
-2. In Home Assistant, open **HACS → Integrations → Custom repositories**.
-3. Add your repository URL and select **Integration** as the category.
-4. Install **Hikvision ANPR** from HACS.
-5. Restart Home Assistant.
-6. Go to **Settings → Devices & Services → Add Integration** and search for **Hikvision ANPR**.
+1. Add this repository as a custom repository in HACS, category **Integration**.
+2. Install **Hikvision ANPR**.
+3. Restart Home Assistant.
+4. Add the integration from **Settings → Devices & Services**.
 
-## Inputs
+## Configuration
 
-The integration asks only for camera-side connection information:
+Provide only the camera connection details in the UI. The integration configures the callback on the camera automatically.
 
-- camera host / IP
-- port
-- HTTP or HTTPS
-- username
-- password
-- auth mode
-- verify SSL
-- channel
-- HTTP host ID
-- media directory
+## Notes
 
-The integration discovers the Home Assistant base URL automatically and configures the camera callback path using the config entry ID.
-
-## Media storage
-
-By default, event images are saved under:
-
-```text
-/media/hikvison_anpr
-```
-
-## Bus event payload
-
-The integration fires `hikvision_anpr_event` with fields such as:
-
-- `event_id`
-- `event_time`
-- `plate`
-- `confidence`
-- `direction`
-- `list_result`
-- `country`
-- `brand`
-- `type`
-- `color`
-- `license_plate_image_path`
-- `vehicle_image_path`
-- `detection_image_path`
-
-## Notes before publishing
-
-Before publishing publicly, replace these placeholders inside `custom_components/hikvision_anpr/manifest.json`:
-
-- `YOUR_GITHUB_USERNAME`
-- repository URLs in `documentation` and `issue_tracker`
-- `codeowners`
-
-## Repository structure
-
-```text
-custom_components/
-  hikvision_anpr/
-    __init__.py
-    manifest.json
-    config_flow.py
-    const.py
-    manager.py
-    parser.py
-    mappings.py
-    sensor.py
-    image.py
-    event.py
-    button.py
-    view.py
-    strings.json
-```
+- For self-signed camera certificates, leave SSL verification disabled.
+- The camera callback target is derived automatically from the Home Assistant instance URL.
+- Media is stored under `/media/hikvison_anpr`.

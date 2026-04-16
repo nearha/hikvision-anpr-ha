@@ -13,7 +13,6 @@
           "auth_mode": "Authentication",
           "verify_ssl": "Verify SSL certificate",
           "channel": "ANPR channel",
-          "http_host_id": "HTTP host slot on camera",
           "media_dir": "Media directory"
         }
       }

@@ -231,39 +231,29 @@ class HikvisionANPRManager:
 
     async def _discover_callback_base_url(self) -> None:
         use_https = bool(self.entry.data.get(CONF_USE_HTTPS, False))
+        scheme = "https" if use_https else "http"
+        local_ip = await async_get_source_ip(self.hass)
+        if not local_ip:
+            raise ValueError("Home Assistant local IP could not be determined")
+
+        port = 8123
         try:
-            if use_https:
-                try:
-                    url = get_url(
-                        self.hass,
-                        require_ssl=True,
-                        allow_internal=True,
-                        allow_external=True,
-                        allow_ip=True,
-                        prefer_external=False,
-                        prefer_cloud=False,
-                    )
-                except NoURLAvailableError:
-                    url = get_url(
-                        self.hass,
-                        allow_internal=True,
-                        allow_external=True,
-                        allow_ip=True,
-                        prefer_external=False,
-                        prefer_cloud=False,
-                    )
-            else:
-                url = get_url(
-                    self.hass,
-                    allow_internal=True,
-                    allow_external=True,
-                    allow_ip=True,
-                    prefer_external=False,
-                    prefer_cloud=False,
-                )
-        except NoURLAvailableError as err:
-            raise ValueError("Home Assistant does not have a usable internal/external URL configured") from err
-        self._callback_base_url = url.rstrip("/")
+            url = get_url(
+                self.hass,
+                allow_internal=True,
+                allow_external=False,
+                allow_ip=True,
+                prefer_external=False,
+                prefer_cloud=False,
+                require_ssl=False,
+            )
+            parsed = urlparse(url)
+            if parsed.port:
+                port = parsed.port
+        except NoURLAvailableError:
+            pass
+
+        self._callback_base_url = f"{scheme}://{local_ip}:{port}"
 
     def device_info(self) -> dict[str, Any]:
         serial = self.device_details.serial_number if self.device_details else self.entry.entry_id

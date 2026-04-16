@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hikvision ANPR",
+        "description": "Configure a Hikvision ANPR camera in listening mode. The integration will auto-configure the camera callback during setup.",
+        "data": {
+          "host": "Camera host or IP address",
+          "port": "Camera port",
+          "use_https": "Use HTTPS",
+          "username": "Camera username",
+          "password": "Camera password",
+          "auth_mode": "Authentication",
+          "verify_ssl": "Verify SSL certificate",
+          "channel": "ANPR channel",
+          "http_host_id": "HTTP host slot on camera",
+          "media_dir": "Media directory"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect or authenticate with the camera."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {"name": "Status"},
+      "plate": {"name": "Last plate"},
+      "confidence": {"name": "Last confidence"},
+      "direction": {"name": "Last direction"},
+      "list_result": {"name": "Last list result"},
+      "country": {"name": "Last country"},
+      "brand": {"name": "Last brand"},
+      "type": {"name": "Last type"},
+      "color": {"name": "Last color"},
+      "event_time": {"name": "Last event time"}
+    }
+  }
+}

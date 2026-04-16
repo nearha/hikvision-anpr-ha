@@ -3,7 +3,7 @@ from __future__ import annotations
 from homeassistant.const import Platform
 
 DOMAIN = "hikvision_anpr"
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.IMAGE, Platform.EVENT, Platform.BUTTON]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.IMAGE, Platform.EVENT]
 
 EVENT_TYPE = "hikvision_anpr_event"
 DEFAULT_PORT = 80

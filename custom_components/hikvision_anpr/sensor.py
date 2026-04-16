@@ -54,4 +54,4 @@ class HikvisionANPRSensor(CoordinatorEntity[HikvisionANPRManager], SensorEntity)
     def extra_state_attributes(self):
         if self.entity_description.key != "status":
             return None
-        return {"last_error": self.coordinator.data.last_error, "callback_path": self._manager.callback_path, "callback_url": self._manager.callback_url}
+        return {"last_error": self.coordinator.data.last_error} if self.coordinator.data.last_error else None

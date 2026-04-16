@@ -90,9 +90,6 @@ class LatestEventState:
     license_plate_image_path: str | None = None
     vehicle_image_path: str | None = None
     detection_image_path: str | None = None
-    license_plate_image_media_source: str | None = None
-    vehicle_image_media_source: str | None = None
-    detection_image_media_source: str | None = None
     image_last_updated: dt.datetime | None = None
 
 
@@ -233,15 +230,37 @@ class HikvisionANPRManager:
         self._set_state(replace(self._current_state, status=STATE_STOPPED))
 
     async def _discover_callback_base_url(self) -> None:
+        use_https = bool(self.entry.data.get(CONF_USE_HTTPS, False))
         try:
-            url = get_url(
-                self.hass,
-                allow_internal=True,
-                allow_external=True,
-                allow_ip=True,
-                prefer_external=False,
-                prefer_cloud=False,
-            )
+            if use_https:
+                try:
+                    url = get_url(
+                        self.hass,
+                        require_ssl=True,
+                        allow_internal=True,
+                        allow_external=True,
+                        allow_ip=True,
+                        prefer_external=False,
+                        prefer_cloud=False,
+                    )
+                except NoURLAvailableError:
+                    url = get_url(
+                        self.hass,
+                        allow_internal=True,
+                        allow_external=True,
+                        allow_ip=True,
+                        prefer_external=False,
+                        prefer_cloud=False,
+                    )
+            else:
+                url = get_url(
+                    self.hass,
+                    allow_internal=True,
+                    allow_external=True,
+                    allow_ip=True,
+                    prefer_external=False,
+                    prefer_cloud=False,
+                )
         except NoURLAvailableError as err:
             raise ValueError("Home Assistant does not have a usable internal/external URL configured") from err
         self._callback_base_url = url.rstrip("/")
@@ -346,9 +365,6 @@ class HikvisionANPRManager:
             "license_plate_image_path": state.license_plate_image_path,
             "vehicle_image_path": state.vehicle_image_path,
             "detection_image_path": state.detection_image_path,
-            "license_plate_image_media_source": state.license_plate_image_media_source,
-            "vehicle_image_media_source": state.vehicle_image_media_source,
-            "detection_image_media_source": state.detection_image_media_source,
             "image_last_updated": state.image_last_updated.isoformat() if state.image_last_updated else None,
         }
 
@@ -385,55 +401,47 @@ class HikvisionANPRManager:
             license_plate_image_path=payload.get("license_plate_image_path"),
             vehicle_image_path=payload.get("vehicle_image_path"),
             detection_image_path=payload.get("detection_image_path"),
-            license_plate_image_media_source=payload.get("license_plate_image_media_source"),
-            vehicle_image_media_source=payload.get("vehicle_image_media_source"),
-            detection_image_media_source=payload.get("detection_image_media_source"),
             image_last_updated=image_last_updated,
         )
-        for path_attr, media_attr in (
-            ("license_plate_image_path", "license_plate_image_media_source"),
-            ("vehicle_image_path", "vehicle_image_media_source"),
-            ("detection_image_path", "detection_image_media_source"),
+        for path_attr in (
+            "license_plate_image_path",
+            "vehicle_image_path",
+            "detection_image_path",
         ):
             path_value = getattr(state, path_attr)
             if path_value and not Path(path_value).exists():
                 setattr(state, path_attr, None)
-                setattr(state, media_attr, None)
         return state
 
     def _translate_country(self, raw_value: Any) -> str:
         text = _value_or_unknown(raw_value)
         if text == STATE_UNKNOWN:
             return STATE_UNKNOWN
-        return COUNTRY_MAP.get(text, text)
+        mapped = COUNTRY_MAP.get(text)
+        if mapped is not None:
+            return mapped
+        if text.isdigit():
+            return STATE_UNKNOWN
+        return text
 
     def _translate_brand(self, raw_value: Any) -> str:
         text = _value_or_unknown(raw_value)
         if text == STATE_UNKNOWN:
             return STATE_UNKNOWN
-        return VEHICLE_BRAND_MAP.get(text, text)
+        if text == '0':
+            return STATE_UNKNOWN
+        mapped = VEHICLE_BRAND_MAP.get(text)
+        if mapped is not None:
+            return mapped
+        if text.isdigit():
+            return STATE_UNKNOWN
+        return text
 
     def _event_fragment(self, value: str | None) -> str:
         if not value:
             return dt.datetime.now().strftime("%Y%m%dT%H%M%S")
         safe = "".join(ch for ch in value if ch.isdigit() or ch in "T:+-")
         return safe.replace(":", "").replace("-", "")[:32]
-
-    def _relative_media_path(self, absolute_path: str | None) -> str | None:
-        if not absolute_path:
-            return None
-        path = Path(absolute_path)
-        try:
-            relative = path.relative_to(Path("/media"))
-        except ValueError:
-            return None
-        return relative.as_posix()
-
-    def _media_source_uri(self, absolute_path: str | None) -> str | None:
-        relative = self._relative_media_path(absolute_path)
-        if not relative:
-            return None
-        return f"media-source://media_source/local/{quote(relative)}"
 
     def _find_event_dict(self, value: Any) -> dict[str, Any] | None:
         if isinstance(value, dict):
@@ -635,9 +643,6 @@ class HikvisionANPRManager:
             license_plate_image_path=image_paths[IMAGE_LICENSE_PLATE],
             vehicle_image_path=image_paths[IMAGE_VEHICLE],
             detection_image_path=image_paths[IMAGE_DETECTION],
-            license_plate_image_media_source=self._media_source_uri(image_paths[IMAGE_LICENSE_PLATE]),
-            vehicle_image_media_source=self._media_source_uri(image_paths[IMAGE_VEHICLE]),
-            detection_image_media_source=self._media_source_uri(image_paths[IMAGE_DETECTION]),
             image_last_updated=dt.datetime.now(dt.timezone.utc) if any(image_paths.values()) else None,
         )
 
@@ -712,10 +717,7 @@ class HikvisionANPRManager:
                 "license_plate_image_path": state.license_plate_image_path,
                 "vehicle_image_path": state.vehicle_image_path,
                 "detection_image_path": state.detection_image_path,
-                "license_plate_image_media_source": state.license_plate_image_media_source,
-                "vehicle_image_media_source": state.vehicle_image_media_source,
-                "detection_image_media_source": state.detection_image_media_source,
-            },
+                        },
         )
 
     @callback

@@ -75,11 +75,6 @@ class HikvisionANPREventEntity(CoordinatorEntity[HikvisionANPRManager], EventEnt
             "license_plate_image_path": state.license_plate_image_path,
             "vehicle_image_path": state.vehicle_image_path,
             "detection_image_path": state.detection_image_path,
-            "license_plate_image_media_source": state.license_plate_image_media_source,
-            "vehicle_image_media_source": state.vehicle_image_media_source,
-            "detection_image_media_source": state.detection_image_media_source,
-            "callback_path": self._manager.callback_path,
-            "callback_url": self._manager.callback_url,
         }
 
     @property

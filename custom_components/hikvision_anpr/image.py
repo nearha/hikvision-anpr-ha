@@ -13,26 +13,22 @@ from .manager import HikvisionANPRManager
 @dataclass(frozen=True, kw_only=True)
 class HikvisionANPRImageDescription(ImageEntityDescription):
     path_key: str
-    media_source_key: str
 
 
 IMAGES: tuple[HikvisionANPRImageDescription, ...] = (
     HikvisionANPRImageDescription(
         key="license_plate",
         path_key="license_plate_image_path",
-        media_source_key="license_plate_image_media_source",
         name="Last license plate image",
     ),
     HikvisionANPRImageDescription(
         key="vehicle",
         path_key="vehicle_image_path",
-        media_source_key="vehicle_image_media_source",
         name="Last vehicle image",
     ),
     HikvisionANPRImageDescription(
         key="detection",
         path_key="detection_image_path",
-        media_source_key="detection_image_media_source",
         name="Last detection image",
     ),
 )
@@ -65,10 +61,7 @@ class HikvisionANPRImage(CoordinatorEntity[HikvisionANPRManager], ImageEntity):
 
     @property
     def extra_state_attributes(self):
-        return {
-            "image_path": getattr(self.coordinator.data, self.entity_description.path_key),
-            "media_source": getattr(self.coordinator.data, self.entity_description.media_source_key),
-        }
+        return {"image_path": getattr(self.coordinator.data, self.entity_description.path_key)}
 
     async def async_image(self) -> bytes | None:
         path = getattr(self.coordinator.data, self.entity_description.path_key)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 COUNTRY_MAP = {
-    '0': 'Not supported by the algorithm',
+    '0': 'unknown',
     '1': 'Czech Republic',
     '2': 'France',
     '3': 'Germany',

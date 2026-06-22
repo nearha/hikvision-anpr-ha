@@ -15,7 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class HikvisionANPRFastManager(HikvisionANPRManager):
-    """Hikvision ANPR manager with a separate fast metadata event path."""
+    """Manager that emits a metadata-only event before image file persistence."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -34,8 +34,4 @@ class HikvisionANPRFastManager(HikvisionANPRManager):
 
     @callback
     def _fire_fast_native_event(self, state: LatestEventState) -> None:
-        for listener in list(self._fast_native_event_listeners):
-            try:
-                listener(state)
-            except Exception:
-                _LOGGER
+       

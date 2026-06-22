@@ -6,7 +6,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN, PLATFORMS
-from .manager import HikvisionANPRManager
+from .fast_manager import HikvisionANPRFastManager as HikvisionANPRManager
 from .view import HikvisionANPRView
 
 type HikvisionANPRConfigEntry = ConfigEntry[HikvisionANPRManager]

@@ -78,7 +78,7 @@ class HikvisionANPREventEntity(CoordinatorEntity[HikvisionANPRManager], EventEnt
         self.async_write_ha_state()
 
     def _event_payload(self, state: LatestEventState) -> dict[str, Any]:
-        return {
+        payload = {
             "event_id": state.event_id,
             "event_time": state.event_time,
             "plate": state.plate,
@@ -89,10 +89,14 @@ class HikvisionANPREventEntity(CoordinatorEntity[HikvisionANPRManager], EventEnt
             "brand": state.brand,
             "type": state.type,
             "color": state.color,
-            "license_plate_image_path": state.license_plate_image_path,
-            "vehicle_image_path": state.vehicle_image_path,
-            "detection_image_path": state.detection_image_path,
         }
+        if not self.entity_description.fast:
+            payload.update({
+                "license_plate_image_path": state.license_plate_image_path,
+                "vehicle_image_path": state.vehicle_image_path,
+                "detection_image_path": state.detection_image_path,
+            })
+        return payload
 
     @property
     def available(self) -> bool:
@@ -100,13 +104,9 @@ class HikvisionANPREventEntity(CoordinatorEntity[HikvisionANPRManager], EventEnt
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        if self.entity_description.fast:
-            state = self._last_event_state
-        else:
-            state = self._last_event_state or self.coordinator.data
-
+        state = self._last_event_state or self.coordinator.data
         if (state is None or state.event_id is None) and self._restored_extra_state_data is not None:
             return self._restored_extra_state_data
-        if state is None:
+        if state is None or state.event_id is None:
             return None
         return self._event_payload(state)

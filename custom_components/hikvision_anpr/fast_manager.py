@@ -33,5 +33,3 @@ class HikvisionANPRFastManager(HikvisionANPRManager):
         return _remove
 
     @callback
-    def _fire_fast_native_event(self, state: LatestEventState) -> None:
-       

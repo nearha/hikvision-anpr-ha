@@ -80,3 +80,10 @@ class HikvisionANPRFastManager(HikvisionANPRManager):
         if state is None:
             return
         self._apply_state(state, emit_events=True)
+
+    async def async_fetch_mnpr_result(self) -> None:
+        state = await self.hass.async_add_executor_job(self._fetch_mnpr_sync)
+        if state is None:
+            raise ValueError("MNPR did not return an ANPR event")
+        self._fire_fast_native_event(state)
+        self._apply_state(state, emit_events=True)

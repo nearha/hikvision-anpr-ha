@@ -72,18 +72,22 @@ class HikvisionANPRFastManager(HikvisionANPRManager):
         )
 
     async def async_handle_callback(self, headers: dict[str, str], body: bytes) -> None:
-        fast_state = await self.hass.async_add_executor_job(self._fast_state_from_callback_sync, headers, body)
-        if fast_state is not None:
-            self._fire_fast_native_event(fast_state)
+        try:
+            fast_state = await self.hass.async_add_executor_job(self._fast_state_from_callback_sync, headers, body)
+        except Exception:
+            self._logger_exception_fast_event()
+        else:
+            if fast_state is not None:
+                self._fire_fast_native_event(fast_state)
 
-        state = await self.hass.async_add_executor_job(self._handle_callback_sync, headers, body)
-        if state is None:
-            return
-        self._apply_state(state, emit_events=True)
+        await super().async_handle_callback(headers, body)
 
     async def async_fetch_mnpr_result(self) -> None:
         state = await self.hass.async_add_executor_job(self._fetch_mnpr_sync)
         if state is None:
             raise ValueError("MNPR did not return an ANPR event")
-        self._fire_fast_native_event(state)
+        try:
+            self._fire_fast_native_event(state)
+        except Exception:
+            self._logger_exception_fast_event()
         self._apply_state(state, emit_events=True)

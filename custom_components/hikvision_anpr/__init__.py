@@ -6,6 +6,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN, PLATFORMS
+from .fast_support import attach_fast_event_support
 from .manager import HikvisionANPRManager
 from .view import HikvisionANPRView
 
@@ -18,6 +19,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: HikvisionANPRConfigEntry) -> bool:
     manager = HikvisionANPRManager(hass, entry)
+    attach_fast_event_support(manager)
     details = await manager.async_initialize()
     entry.runtime_data = manager
 

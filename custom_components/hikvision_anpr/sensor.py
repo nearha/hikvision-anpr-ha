@@ -54,4 +54,37 @@ class HikvisionANPRSensor(CoordinatorEntity[HikvisionANPRManager], SensorEntity)
     def extra_state_attributes(self):
         if self.entity_description.key != "status":
             return None
-        return {"last_error": self.coordinator.data.last_error} if self.coordinator.data.last_error else None
+
+        attributes = {
+            "fast_status": getattr(self._manager, "_fast_polling_status", "unknown"),
+            "callback_status": getattr(self._manager, "_callback_status", "unknown"),
+        }
+
+        if self.coordinator.data.last_error:
+            attributes["last_error"] = self.coordinator.data.last_error
+
+        fast_last_error = getattr(self._manager, "_fast_last_error", None)
+        if fast_last_error:
+            attributes["fast_last_error"] = fast_last_error
+
+        fast_last_success = getattr(self._manager, "_fast_last_success", None)
+        if fast_last_success:
+            attributes["fast_last_success"] = fast_last_success
+
+        callback_last_error = getattr(self._manager, "_callback_last_error", None)
+        if callback_last_error:
+            attributes["callback_last_error"] = callback_last_error
+
+        last_callback_at = getattr(self._manager, "_last_callback_at", None)
+        if last_callback_at:
+            attributes["last_callback_at"] = last_callback_at
+
+        last_callback_event_id = getattr(self._manager, "_last_callback_event_id", None)
+        if last_callback_event_id:
+            attributes["last_callback_event_id"] = last_callback_event_id
+
+        allowed_ips = getattr(self._manager, "_allowed_callback_ips", set())
+        if allowed_ips:
+            attributes["callback_source_ips"] = sorted(allowed_ips)
+
+        return attributes

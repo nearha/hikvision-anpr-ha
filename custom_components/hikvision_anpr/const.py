@@ -21,6 +21,9 @@ CONF_CHANNEL = "channel"
 CONF_MEDIA_DIR = "media_dir"
 CONF_HTTP_HOST_ID = "http_host_id"
 
+DATA_MANAGERS = "managers"
+DATA_VIEW_REGISTERED = "view_registered"
+
 AUTH_DIGEST = "digest"
 AUTH_BASIC = "basic"
 

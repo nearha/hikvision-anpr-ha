@@ -54,8 +54,16 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
         vehicle_info = anpr.get("vehicleInfo") if isinstance(anpr.get("vehicleInfo"), dict) else {}
         event_time = _value_or_unknown(root.get("dateTime"))
         plate = _value_or_unknown(anpr.get("licensePlate") or anpr.get("originalLicensePlate"))
-        event_uuid = _value_or_unknown(root.get("UUID") or root.get("uuid") or f"evt_{dt.datetime.now().strftime('%H%M%S%f')}")
-        event_id = f"{manager._event_fragment(event_time)}_{sanitize_filename(plate)}_{sanitize_filename(event_uuid)[:40]}"
+        event_uuid = _value_or_unknown(
+            root.get("UUID")
+            or root.get("uuid")
+            or f"evt_{dt.datetime.now().strftime('%H%M%S%f')}"
+        )
+        event_id = (
+            f"{manager._event_fragment(event_time)}_"
+            f"{sanitize_filename(plate)}_"
+            f"{sanitize_filename(event_uuid)[:40]}"
+        )
 
         return LatestEventState(
             status=STATE_CONNECTED,
@@ -81,18 +89,26 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
             return None
         return _fast_state_from_payload(payload)
 
-    async def async_handle_callback(headers: dict[str, str], body: bytes) -> None:
+    async def async_try_fast_event(headers: dict[str, str], body: bytes) -> bool:
+        """Try to emit the fast event from a complete or partially received body."""
         try:
             fast_state = await manager.hass.async_add_executor_job(
                 _fast_state_from_callback_sync,
                 headers,
                 body,
             )
-            if fast_state is not None:
-                _fire_fast_native_event(fast_state)
         except Exception:
             _LOGGER.exception("Fast ANPR event processing failed; continuing with full event")
+            return False
 
+        if fast_state is None:
+            return False
+
+        _fire_fast_native_event(fast_state)
+        return True
+
+    async def async_handle_callback(headers: dict[str, str], body: bytes) -> None:
+        await async_try_fast_event(headers, body)
         await original_async_handle_callback(headers, body)
 
     async def async_fetch_mnpr_result() -> None:
@@ -106,5 +122,7 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
         manager._apply_state(state, emit_events=True)
 
     manager.async_register_fast_event_listener = async_register_fast_event_listener  # type: ignore[attr-defined, method-assign]
+    manager.async_try_fast_event = async_try_fast_event  # type: ignore[attr-defined, method-assign]
+    manager.async_handle_full_callback = original_async_handle_callback  # type: ignore[attr-defined, method-assign]
     manager.async_handle_callback = async_handle_callback  # type: ignore[method-assign]
     manager.async_fetch_mnpr_result = async_fetch_mnpr_result  # type: ignore[method-assign]

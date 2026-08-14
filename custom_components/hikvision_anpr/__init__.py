@@ -16,6 +16,7 @@ from .const import (
 )
 from .fast_support import attach_fast_event_support
 from .manager import HikvisionANPRManager
+from .runtime_support import attach_runtime_stability
 from .view import HikvisionANPRView
 
 type HikvisionANPRConfigEntry = ConfigEntry[HikvisionANPRManager]
@@ -34,6 +35,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: HikvisionANPRConfigEntry) -> bool:
     manager = HikvisionANPRManager(hass, entry)
+    attach_runtime_stability(manager)
     attach_fast_event_support(manager)
     details = await manager.async_initialize()
     entry.runtime_data = manager

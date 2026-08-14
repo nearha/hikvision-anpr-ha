@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import replace
 import datetime as dt
 import json
 import logging
@@ -10,7 +11,7 @@ from typing import Any
 
 from homeassistant.core import callback
 
-from .const import STATE_CONNECTED
+from .const import STATE_CONNECTED, STATE_DEGRADED, STATE_STOPPED
 from .manager import HikvisionANPRManager, LatestEventState, _value_or_unknown
 from .parser import ensure_list, parse_xml_bytes, sanitize_filename
 
@@ -50,8 +51,35 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
         manager._fast_last_error = error  # type: ignore[attr-defined]  # noqa: SLF001
         if status == "connected":
             manager._fast_last_success = dt.datetime.now(dt.timezone.utc).isoformat()  # type: ignore[attr-defined]  # noqa: SLF001
-        if previous_status != status or previous_error != error:
-            _refresh_coordinator()
+
+        if previous_status == status and previous_error == error:
+            return
+
+        current = manager.coordinator.data
+        if current is None:
+            return
+
+        if status == "disconnected" and current.status != STATE_STOPPED:
+            manager._set_state(  # noqa: SLF001
+                replace(
+                    current,
+                    status=STATE_DEGRADED,
+                    last_error=f"Fast ANPR polling: {error or 'unavailable'}",
+                )
+            )
+            return
+
+        if (
+            status == "connected"
+            and current.status == STATE_DEGRADED
+            and getattr(manager, "_callback_status", None) != "error"
+        ):
+            manager._set_state(  # noqa: SLF001
+                replace(current, status=STATE_CONNECTED, last_error=None)
+            )
+            return
+
+        _refresh_coordinator()
 
     @callback
     def async_register_fast_event_listener(

@@ -61,6 +61,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikvisionANPRConfigEntry
         await manager.async_stop()
         raise ConfigEntryNotReady(f"Failed to configure/test ANPR callback on device: {err}") from err
 
+    manager._callback_status = "ready"  # type: ignore[attr-defined]  # noqa: SLF001
+    manager._callback_last_error = None  # type: ignore[attr-defined]  # noqa: SLF001
     manager._set_state(  # noqa: SLF001 - manager owns the shared coordinator state
         replace(manager._current_state, status=STATE_CONNECTED, last_error=None)  # noqa: SLF001
     )

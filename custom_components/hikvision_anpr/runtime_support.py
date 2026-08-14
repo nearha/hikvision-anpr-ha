@@ -13,7 +13,12 @@ from urllib.parse import urlparse
 from homeassistant.components.network import async_get_source_ip
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
-from .const import STATE_DISCONNECTED
+from .const import (
+    STATE_CONNECTED,
+    STATE_DEGRADED,
+    STATE_DISCONNECTED,
+    STATE_STOPPED,
+)
 from .manager import (
     HikvisionANPRManager,
     LatestEventState,
@@ -51,8 +56,35 @@ def attach_runtime_stability(manager: HikvisionANPRManager) -> None:
         previous_error = getattr(manager, "_callback_last_error", None)
         manager._callback_status = status  # type: ignore[attr-defined]  # noqa: SLF001
         manager._callback_last_error = error  # type: ignore[attr-defined]  # noqa: SLF001
-        if previous_status != status or previous_error != error:
-            _refresh_coordinator()
+
+        if previous_status == status and previous_error == error:
+            return
+
+        current = manager.coordinator.data
+        if current is None:
+            return
+
+        if status == "error" and current.status != STATE_STOPPED:
+            manager._set_state(  # noqa: SLF001
+                replace(
+                    current,
+                    status=STATE_DEGRADED,
+                    last_error=f"ANPR callback: {error or 'processing error'}",
+                )
+            )
+            return
+
+        if (
+            status in {"ready", "active"}
+            and current.status == STATE_DEGRADED
+            and getattr(manager, "_fast_polling_status", None) != "disconnected"
+        ):
+            manager._set_state(  # noqa: SLF001
+                replace(current, status=STATE_CONNECTED, last_error=None)
+            )
+            return
+
+        _refresh_coordinator()
 
     def _claim_event_id(event_id: str) -> bool:
         with recent_event_lock:
@@ -257,12 +289,20 @@ def attach_runtime_stability(manager: HikvisionANPRManager) -> None:
                 _set_callback_health("error", str(err))
                 raise
 
+            _set_callback_health("active")
             if state is None:
                 return
 
-            manager._callback_status = "active"  # type: ignore[attr-defined]  # noqa: SLF001
-            manager._callback_last_error = None  # type: ignore[attr-defined]  # noqa: SLF001
             manager._last_callback_event_id = state.event_id  # type: ignore[attr-defined]  # noqa: SLF001
+            if getattr(manager, "_fast_polling_status", None) == "disconnected":
+                state = replace(
+                    state,
+                    status=STATE_DEGRADED,
+                    last_error=(
+                        "Fast ANPR polling: "
+                        f"{getattr(manager, '_fast_last_error', None) or 'unavailable'}"
+                    ),
+                )
             manager._set_state(state)  # noqa: SLF001
             manager._fire_bus_event(state)  # noqa: SLF001
             manager._fire_native_event(state)  # noqa: SLF001
@@ -274,6 +314,15 @@ def attach_runtime_stability(manager: HikvisionANPRManager) -> None:
             if state is None:
                 raise ValueError("MNPR did not return an ANPR event")
 
+            if getattr(manager, "_fast_polling_status", None) == "disconnected":
+                state = replace(
+                    state,
+                    status=STATE_DEGRADED,
+                    last_error=(
+                        "Fast ANPR polling: "
+                        f"{getattr(manager, '_fast_last_error', None) or 'unavailable'}"
+                    ),
+                )
             manager._set_state(state)  # noqa: SLF001
             manager._fire_bus_event(state)  # noqa: SLF001
             manager._fire_native_event(state)  # noqa: SLF001

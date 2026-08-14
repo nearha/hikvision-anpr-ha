@@ -16,7 +16,10 @@ from .parser import ensure_list, parse_xml_bytes, sanitize_filename
 
 _LOGGER = logging.getLogger(__name__)
 
-_FAST_POLL_INTERVAL = 1.0
+# Match the proven polling cadence used by node-red-contrib-hikvision-ultimate.
+# Keeping this conservative reduces load on the camera while the normal HTTP
+# callback continues independently for images and the complete ANPR event.
+_FAST_POLL_INTERVAL = 3.0
 _INITIAL_PIC_NAME = "202001301301320000"
 
 
@@ -152,7 +155,8 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
             ),
             direction=_value_or_unknown(plate_data.get("direction")),
             list_result=_value_or_unknown(
-                plate_data.get("vehicleListName")
+                plate_data.get("matchingResult")
+                or plate_data.get("vehicleListName")
                 or plate_data.get("listName")
             ),
             country=manager._translate_country(plate_data.get("country")),

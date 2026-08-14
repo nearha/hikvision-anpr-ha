@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import suppress
 import datetime as dt
+import json
 import logging
 from typing import Any
 
@@ -63,6 +64,12 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
         except (TypeError, ValueError):
             return (1, value)
 
+    def _pic_name_numeric_key(value: str) -> tuple[int, int | str]:
+        try:
+            return (1, int(value))
+        except (TypeError, ValueError):
+            return (0, value)
+
     def _is_newer_pic_name(value: str, cursor: str) -> bool:
         if not value:
             return False
@@ -70,6 +77,20 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
             return int(value) > int(cursor)
         except (TypeError, ValueError):
             return value > cursor
+
+    def _decode_plates_response(body: bytes) -> dict[str, Any]:
+        stripped = body.lstrip()
+        if stripped.startswith(b"{"):
+            parsed = json.loads(stripped.decode("utf-8", errors="replace"))
+            if not isinstance(parsed, dict):
+                raise ValueError("Camera plate query returned invalid JSON")
+            return parsed
+
+        xml_start = body.find(b"<")
+        if xml_start >= 0:
+            return parse_xml_bytes(body[xml_start:])
+
+        raise ValueError("Camera plate query returned neither XML nor JSON")
 
     def _fetch_plates_after_sync(cursor: str) -> list[dict[str, Any]]:
         request_body = (
@@ -84,15 +105,14 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
                 f"{manager.channel}/vehicleDetect/plates"
             ),
             data=request_body,
-            headers={"Content-Type": 'application/xml; charset="UTF-8"'},
             timeout=(5, 10),
         )
         response.raise_for_status()
 
-        parsed = parse_xml_bytes(response.content)
-        root = parsed.get("Plates", parsed)
+        parsed = _decode_plates_response(response.content)
+        root = parsed.get("Plates")
         if not isinstance(root, dict):
-            return []
+            raise ValueError("Camera plate query did not return a Plates object")
 
         return [
             item
@@ -167,13 +187,7 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
                         if _pic_name(item.get("picName"))
                     ]
                     if valid_pic_names:
-                        cursor = max(
-                            valid_pic_names,
-                            key=lambda value: (
-                                int(value) if value.isdigit() else -1,
-                                value,
-                            ),
-                        )
+                        cursor = max(valid_pic_names, key=_pic_name_numeric_key)
                     initialized = True
                     if failure_reported:
                         _LOGGER.info("Fast ANPR polling connected")

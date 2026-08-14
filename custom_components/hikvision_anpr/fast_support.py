@@ -34,6 +34,25 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
     fast_event_listeners: list[Callable[[LatestEventState], None]] = []
     fast_poll_task: asyncio.Task[None] | None = None
 
+    manager._fast_polling_status = "stopped"  # type: ignore[attr-defined]  # noqa: SLF001
+    manager._fast_last_error = None  # type: ignore[attr-defined]  # noqa: SLF001
+    manager._fast_last_success = None  # type: ignore[attr-defined]  # noqa: SLF001
+
+    def _refresh_coordinator() -> None:
+        data = manager.coordinator.data
+        if data is not None:
+            manager.coordinator.async_set_updated_data(data)
+
+    def _set_fast_health(status: str, error: str | None = None) -> None:
+        previous_status = getattr(manager, "_fast_polling_status", None)
+        previous_error = getattr(manager, "_fast_last_error", None)
+        manager._fast_polling_status = status  # type: ignore[attr-defined]  # noqa: SLF001
+        manager._fast_last_error = error  # type: ignore[attr-defined]  # noqa: SLF001
+        if status == "connected":
+            manager._fast_last_success = dt.datetime.now(dt.timezone.utc).isoformat()  # type: ignore[attr-defined]  # noqa: SLF001
+        if previous_status != status or previous_error != error:
+            _refresh_coordinator()
+
     @callback
     def async_register_fast_event_listener(
         listener: Callable[[LatestEventState], None],
@@ -185,6 +204,10 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
                 plates.sort(key=_pic_sort_key)
 
                 if not initialized:
+                    # Initialization and recovery deliberately consume history
+                    # without emitting it. This mirrors the Node-RED ANPR reader
+                    # and prevents a stale whitelist event from opening a gate
+                    # after Home Assistant or the camera reconnects.
                     valid_pic_names = [
                         _pic_name(item.get("picName"))
                         for item in plates
@@ -194,8 +217,12 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
                         cursor = max(valid_pic_names, key=_pic_name_numeric_key)
                     initialized = True
                     if failure_reported:
-                        _LOGGER.info("Fast ANPR polling connected")
+                        _LOGGER.info(
+                            "Fast ANPR polling recovered and re-synchronized at picName %s",
+                            cursor,
+                        )
                     failure_reported = False
+                    _set_fast_health("connected")
                 else:
                     for plate_data in plates:
                         pic_name = _pic_name(plate_data.get("picName"))
@@ -210,10 +237,17 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
                     if failure_reported:
                         _LOGGER.info("Fast ANPR polling recovered")
                     failure_reported = False
+                    _set_fast_health("connected")
 
             except asyncio.CancelledError:
                 raise
             except Exception as err:
+                # Match the Node-RED recovery model: after a polling failure,
+                # reinitialize from camera history on the next successful request
+                # and move the cursor to the newest plate without replaying backlog.
+                cursor = _INITIAL_PIC_NAME
+                initialized = False
+                _set_fast_health("disconnected", str(err))
                 if not failure_reported:
                     _LOGGER.warning(
                         "Fast ANPR polling unavailable; normal ANPR callback "
@@ -231,6 +265,7 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
         if fast_poll_task is not None and not fast_poll_task.done():
             return
 
+        _set_fast_health("starting")
         fast_poll_task = manager.hass.async_create_task(
             _poll_fast_events(),
             name=f"{manager.domain}_fast_anpr_{manager.entry.entry_id}",
@@ -241,11 +276,13 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
         task = fast_poll_task
         fast_poll_task = None
         if task is None:
+            _set_fast_health("stopped")
             return
 
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        _set_fast_health("stopped")
 
     manager.async_register_fast_event_listener = async_register_fast_event_listener  # type: ignore[attr-defined, method-assign]
     manager.async_start_fast_polling = async_start_fast_polling  # type: ignore[attr-defined, method-assign]

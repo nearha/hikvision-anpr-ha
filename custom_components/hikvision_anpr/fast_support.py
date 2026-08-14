@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from contextlib import suppress
 import datetime as dt
 import logging
 from typing import Any
@@ -9,20 +11,24 @@ from homeassistant.core import callback
 
 from .const import STATE_CONNECTED
 from .manager import HikvisionANPRManager, LatestEventState, _value_or_unknown
-from .parser import sanitize_filename
+from .parser import ensure_list, parse_xml_bytes, sanitize_filename
 
 _LOGGER = logging.getLogger(__name__)
 
+_FAST_POLL_INTERVAL = 1.0
+_INITIAL_PIC_NAME = "202001301301320000"
+
 
 def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
-    """Attach a safe metadata-only fast event path to a manager instance.
+    """Attach an isolated fast ANPR path backed by the camera plate database.
 
-    The original manager class, callback URL, and complete ANPR processing path stay
-    untouched. Fast parsing is best-effort and must never block the original event.
+    The complete ANPR HTTP callback remains untouched. The fast entity is fed by
+    polling Hikvision's lightweight vehicleDetect/plates endpoint with picName as
+    a cursor, matching the strategy used by node-red-contrib-hikvision-ultimate.
     """
 
     fast_event_listeners: list[Callable[[LatestEventState], None]] = []
-    original_async_handle_callback = manager.async_handle_callback
+    fast_poll_task: asyncio.Task[None] | None = None
 
     @callback
     def async_register_fast_event_listener(
@@ -45,84 +51,184 @@ def attach_fast_event_support(manager: HikvisionANPRManager) -> None:
             except Exception:
                 _LOGGER.exception("Error delivering fast ANPR event entity update")
 
-    def _fast_state_from_payload(payload: dict[str, Any]) -> LatestEventState | None:
-        root = manager._find_event_dict(payload)
-        if root is None or _value_or_unknown(root.get("eventType")).upper() != "ANPR":
-            return None
+    def _pic_name(value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
 
-        anpr = root.get("ANPR") if isinstance(root.get("ANPR"), dict) else {}
-        vehicle_info = anpr.get("vehicleInfo") if isinstance(anpr.get("vehicleInfo"), dict) else {}
-        event_time = _value_or_unknown(root.get("dateTime"))
-        plate = _value_or_unknown(anpr.get("licensePlate") or anpr.get("originalLicensePlate"))
-        event_uuid = _value_or_unknown(
-            root.get("UUID")
-            or root.get("uuid")
-            or f"evt_{dt.datetime.now().strftime('%H%M%S%f')}"
+    def _pic_sort_key(plate: dict[str, Any]) -> tuple[int, int | str]:
+        value = _pic_name(plate.get("picName"))
+        try:
+            return (0, int(value))
+        except (TypeError, ValueError):
+            return (1, value)
+
+    def _is_newer_pic_name(value: str, cursor: str) -> bool:
+        if not value:
+            return False
+        try:
+            return int(value) > int(cursor)
+        except (TypeError, ValueError):
+            return value > cursor
+
+    def _fetch_plates_after_sync(cursor: str) -> list[dict[str, Any]]:
+        request_body = (
+            "<AfterTime>"
+            f"<picTime>{cursor}</picTime>"
+            "</AfterTime>"
+        ).encode("utf-8")
+        response = manager._request_sync(
+            "POST",
+            (
+                f"{manager.base_url}/ISAPI/Traffic/channels/"
+                f"{manager.channel}/vehicleDetect/plates"
+            ),
+            data=request_body,
+            headers={"Content-Type": 'application/xml; charset="UTF-8"'},
+            timeout=(5, 10),
         )
-        event_id = (
-            f"{manager._event_fragment(event_time)}_"
-            f"{sanitize_filename(plate)}_"
-            f"{sanitize_filename(event_uuid)[:40]}"
+        response.raise_for_status()
+
+        parsed = parse_xml_bytes(response.content)
+        root = parsed.get("Plates", parsed)
+        if not isinstance(root, dict):
+            return []
+
+        return [
+            item
+            for item in ensure_list(root.get("Plate"))
+            if isinstance(item, dict)
+        ]
+
+    def _fast_state_from_plate(plate_data: dict[str, Any]) -> LatestEventState:
+        pic_name = _pic_name(plate_data.get("picName"))
+        event_time = _value_or_unknown(
+            plate_data.get("captureTime")
+            or plate_data.get("dateTime")
         )
+        plate = _value_or_unknown(
+            plate_data.get("plateNumber")
+            or plate_data.get("licensePlate")
+        )
+        event_fragment = manager._event_fragment(event_time)
+        unique_fragment = sanitize_filename(
+            pic_name
+            or f"poll_{dt.datetime.now().strftime('%H%M%S%f')}"
+        )[:40]
 
         return LatestEventState(
             status=STATE_CONNECTED,
             last_error=None,
-            event_id=event_id,
+            event_id=(
+                f"{event_fragment}_"
+                f"{sanitize_filename(plate)}_"
+                f"{unique_fragment}"
+            ),
             event_time=event_time,
             plate=plate,
-            confidence=_value_or_unknown(anpr.get("confidenceLevel")),
-            direction=_value_or_unknown(anpr.get("direction")),
-            list_result=_value_or_unknown(anpr.get("vehicleListName")),
-            country=manager._translate_country(anpr.get("country")),
-            brand=manager._translate_brand(vehicle_info.get("vehicleLogoRecog")),
-            type=_value_or_unknown(anpr.get("vehicleType")),
-            color=_value_or_unknown(vehicle_info.get("color")),
+            confidence=_value_or_unknown(
+                plate_data.get("confidenceLevel")
+                or plate_data.get("confidence")
+            ),
+            direction=_value_or_unknown(plate_data.get("direction")),
+            list_result=_value_or_unknown(
+                plate_data.get("vehicleListName")
+                or plate_data.get("listName")
+            ),
+            country=manager._translate_country(plate_data.get("country")),
+            brand=manager._translate_brand(
+                plate_data.get("vehicleLogoRecog")
+                or plate_data.get("brand")
+            ),
+            type=_value_or_unknown(plate_data.get("vehicleType")),
+            color=_value_or_unknown(
+                plate_data.get("color")
+                or plate_data.get("vehicleColor")
+            ),
         )
 
-    def _fast_state_from_callback_sync(
-        headers: dict[str, str],
-        body: bytes,
-    ) -> LatestEventState | None:
-        payload, _raw, _parts = manager._parse_payload(headers, body)
-        if payload is None:
-            return None
-        return _fast_state_from_payload(payload)
+    async def _poll_fast_events() -> None:
+        cursor = _INITIAL_PIC_NAME
+        initialized = False
+        failure_reported = False
 
-    async def async_try_fast_event(headers: dict[str, str], body: bytes) -> bool:
-        """Try to emit the fast event from a complete or partially received body."""
-        try:
-            fast_state = await manager.hass.async_add_executor_job(
-                _fast_state_from_callback_sync,
-                headers,
-                body,
-            )
-        except Exception:
-            _LOGGER.exception("Fast ANPR event processing failed; continuing with full event")
-            return False
+        while True:
+            try:
+                plates = await manager.hass.async_add_executor_job(
+                    _fetch_plates_after_sync,
+                    cursor,
+                )
+                plates.sort(key=_pic_sort_key)
 
-        if fast_state is None:
-            return False
+                if not initialized:
+                    valid_pic_names = [
+                        _pic_name(item.get("picName"))
+                        for item in plates
+                        if _pic_name(item.get("picName"))
+                    ]
+                    if valid_pic_names:
+                        cursor = max(
+                            valid_pic_names,
+                            key=lambda value: (
+                                int(value) if value.isdigit() else -1,
+                                value,
+                            ),
+                        )
+                    initialized = True
+                    if failure_reported:
+                        _LOGGER.info("Fast ANPR polling connected")
+                    failure_reported = False
+                else:
+                    for plate_data in plates:
+                        pic_name = _pic_name(plate_data.get("picName"))
+                        if not _is_newer_pic_name(pic_name, cursor):
+                            continue
 
-        _fire_fast_native_event(fast_state)
-        return True
+                        _fire_fast_native_event(
+                            _fast_state_from_plate(plate_data)
+                        )
+                        cursor = pic_name
 
-    async def async_handle_callback(headers: dict[str, str], body: bytes) -> None:
-        await async_try_fast_event(headers, body)
-        await original_async_handle_callback(headers, body)
+                    if failure_reported:
+                        _LOGGER.info("Fast ANPR polling recovered")
+                    failure_reported = False
 
-    async def async_fetch_mnpr_result() -> None:
-        state = await manager.hass.async_add_executor_job(manager._fetch_mnpr_sync)
-        if state is None:
-            raise ValueError("MNPR did not return an ANPR event")
-        try:
-            _fire_fast_native_event(state)
-        except Exception:
-            _LOGGER.exception("Fast ANPR manual event processing failed; continuing with full event")
-        manager._apply_state(state, emit_events=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                if not failure_reported:
+                    _LOGGER.warning(
+                        "Fast ANPR polling unavailable; normal ANPR callback "
+                        "continues unchanged: %s",
+                        err,
+                    )
+                    failure_reported = True
+                else:
+                    _LOGGER.debug("Fast ANPR polling still unavailable: %s", err)
+
+            await asyncio.sleep(_FAST_POLL_INTERVAL)
+
+    async def async_start_fast_polling() -> None:
+        nonlocal fast_poll_task
+        if fast_poll_task is not None and not fast_poll_task.done():
+            return
+
+        fast_poll_task = manager.hass.async_create_task(
+            _poll_fast_events(),
+            name=f"{manager.domain}_fast_anpr_{manager.entry.entry_id}",
+        )
+
+    async def async_stop_fast_polling() -> None:
+        nonlocal fast_poll_task
+        task = fast_poll_task
+        fast_poll_task = None
+        if task is None:
+            return
+
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
     manager.async_register_fast_event_listener = async_register_fast_event_listener  # type: ignore[attr-defined, method-assign]
-    manager.async_try_fast_event = async_try_fast_event  # type: ignore[attr-defined, method-assign]
-    manager.async_handle_full_callback = original_async_handle_callback  # type: ignore[attr-defined, method-assign]
-    manager.async_handle_callback = async_handle_callback  # type: ignore[method-assign]
-    manager.async_fetch_mnpr_result = async_fetch_mnpr_result  # type: ignore[method-assign]
+    manager.async_start_fast_polling = async_start_fast_polling  # type: ignore[attr-defined, method-assign]
+    manager.async_stop_fast_polling = async_stop_fast_polling  # type: ignore[attr-defined, method-assign]

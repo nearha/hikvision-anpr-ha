@@ -42,11 +42,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikvisionANPRConfigEntry
         raise ConfigEntryNotReady(f"Failed to configure/test ANPR callback on device: {err}") from err
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    start_fast_polling = getattr(manager, "async_start_fast_polling", None)
+    if start_fast_polling is not None:
+        await start_fast_polling()
+
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: HikvisionANPRConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        stop_fast_polling = getattr(entry.runtime_data, "async_stop_fast_polling", None)
+        if stop_fast_polling is not None:
+            await stop_fast_polling()
         await entry.runtime_data.async_stop()
     return unload_ok
